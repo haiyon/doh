@@ -1,0 +1,14 @@
+[functions]
+  directory = "deploy/netlify/functions"
+
+[[redirects]]
+  from = "/dns-query"
+  to = "/.netlify/functions/dns-query"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/healthz"
+  to = "/.netlify/functions/healthz"
+  status = 200
+  force = true

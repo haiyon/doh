@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "doh",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-02-26",
+  "workers_dev": true,
+  // Optional for upstream-heavy workloads:
+  // "placement": { "mode": "smart" },
+  "vars": {
+    "DOH_REGION": "global",
+    "DOH_BATCH_SIZE": "3",
+    "DOH_UPSTREAM_TIMEOUT_MS": "4000",
+    "DOH_EDGE_CACHE": "false",
+    "DOH_DEBUG": "false"
+  }
+  // Best practice: store token as secret instead of plaintext vars
+  // wrangler secret put DOH_TOKEN
+}

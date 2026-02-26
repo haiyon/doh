@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "build": {
+    "env": {
+      "GO_BUILD_FLAGS": "-ldflags '-s -w'"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/dns-query",
+      "destination": "/api/dns-query"
+    },
+    {
+      "source": "/healthz",
+      "destination": "/api/healthz"
+    }
+  ]
+}

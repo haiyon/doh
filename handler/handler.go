@@ -10,8 +10,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -22,7 +24,7 @@ import (
 
 const (
 	contentTypeDNS   = "application/dns-message"
-	maxBodySize      = 64 * 1024
+	maxBodySize      = 65535 // DNS wire-format message maximum size (16-bit length field).
 	dnsRcodeNoError  = 0
 	dnsRcodeServFail = 2
 )
@@ -130,20 +132,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	dnsPayload, body, ok := h.parseRequest(w, r)
+	dnsPayload, body, rawMsg, ok := h.parseRequest(w, r)
 	if !ok {
 		return
 	}
 
 	qname, qtype := ".", "UNKNOWN"
 	if h.cfg.Debug {
-		// Decode DNS bytes only in debug mode for query-level logging.
-		var rawMsg []byte
-		if r.Method == http.MethodGet {
-			rawMsg, _ = base64.RawURLEncoding.DecodeString(dnsPayload)
-		} else {
-			rawMsg = body
-		}
 		qname, qtype = dnsQuestion(rawMsg)
 	}
 
@@ -198,45 +193,52 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseRequest extracts the DNS payload identifier and raw body from r.
-// For GET, dnsPayload is the base64url-decoded dns parameter value (raw wire bytes).
+// For GET, dnsPayload is the base64url-encoded dns parameter value.
 // For POST, body contains the raw wire bytes directly.
-func (h *Handler) parseRequest(w http.ResponseWriter, r *http.Request) (dnsPayload string, body []byte, ok bool) {
+func (h *Handler) parseRequest(w http.ResponseWriter, r *http.Request) (dnsPayload string, body, rawMsg []byte, ok bool) {
 	if r.Method == http.MethodGet {
 		dns := r.URL.Query().Get("dns")
 		if dns == "" {
 			writeError(w, http.StatusBadRequest, "Bad Request: missing dns query parameter")
-			return "", nil, false
+			return "", nil, nil, false
 		}
 		// Validate the dns parameter is valid base64url (RFC 8484 §4.1).
-		if _, err := base64.RawURLEncoding.DecodeString(dns); err != nil {
+		raw, err := base64.RawURLEncoding.DecodeString(dns)
+		if err != nil {
 			writeError(w, http.StatusBadRequest, "Bad Request: dns parameter is not valid base64url")
-			return "", nil, false
+			return "", nil, nil, false
 		}
-		return dns, nil, true
+		if len(raw) > maxBodySize {
+			writeError(w, http.StatusRequestEntityTooLarge,
+				fmt.Sprintf("Request Entity Too Large: dns parameter exceeds %d bytes", maxBodySize))
+			return "", nil, nil, false
+		}
+		return dns, nil, raw, true
 	}
 
 	// RFC 8484 §4.1: POST Content-Type must be application/dns-message.
 	ct := r.Header.Get("Content-Type")
-	if !strings.HasPrefix(ct, contentTypeDNS) {
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil || !strings.EqualFold(mediaType, contentTypeDNS) {
 		writeError(w, http.StatusUnsupportedMediaType, "Unsupported Media Type: Content-Type must be application/dns-message")
-		return "", nil, false
+		return "", nil, nil, false
 	}
 
 	data, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "Bad Request: failed to read request body")
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	if len(data) > maxBodySize {
 		writeError(w, http.StatusRequestEntityTooLarge,
 			fmt.Sprintf("Request Entity Too Large: body exceeds %d bytes", maxBodySize))
-		return "", nil, false
+		return "", nil, nil, false
 	}
 	if len(data) == 0 {
 		writeError(w, http.StatusBadRequest, "Bad Request: empty POST body")
-		return "", nil, false
+		return "", nil, nil, false
 	}
-	return "", data, true
+	return "", data, data, true
 }
 
 // queryUpstreams fans out the DNS query to upstreams in sequential batches.
@@ -324,7 +326,11 @@ func (h *Handler) queryOne(ctx context.Context, url, method, dnsPayload string, 
 	var err error
 
 	if method == http.MethodGet {
-		req, err = http.NewRequestWithContext(reqCtx, http.MethodGet, url+"?dns="+dnsPayload, nil)
+		targetURL, buildErr := buildUpstreamGETURL(url, dnsPayload)
+		if buildErr != nil {
+			return upstreamResult{url: url, err: fmt.Errorf("build GET URL: %w", buildErr)}
+		}
+		req, err = http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
 	} else {
 		req, err = http.NewRequestWithContext(reqCtx, http.MethodPost, url, bytes.NewReader(body))
 		if err == nil {
@@ -468,6 +474,17 @@ func writeSegment(h io.Writer, data []byte) {
 	if len(data) > 0 {
 		_, _ = h.Write(data)
 	}
+}
+
+func buildUpstreamGETURL(rawURL, dnsPayload string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("dns", dnsPayload)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 // dnsQuestion extracts the query name and query type from a DNS wire-format message.

@@ -74,6 +74,21 @@ func TestParseRequestRejectsInvalidBase64(t *testing.T) {
 	}
 }
 
+func TestParseRequestRejectsOversizedGETDNSPayload(t *testing.T) {
+	h := New(Config{Upstreams: []string{"https://example.com/dns-query"}, UpstreamTimeout: time.Second})
+
+	oversized := make([]byte, maxBodySize+1)
+	dns := base64.RawURLEncoding.EncodeToString(oversized)
+
+	req := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+dns, nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected 413 for oversized dns payload, got %d", rec.Code)
+	}
+}
+
 func TestParseRequestPostRequiresContentType(t *testing.T) {
 	h := New(Config{Upstreams: []string{"https://example.com/dns-query"}, UpstreamTimeout: time.Second})
 
@@ -84,6 +99,29 @@ func TestParseRequestPostRequiresContentType(t *testing.T) {
 
 	if rec.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("expected 415 for wrong Content-Type, got %d", rec.Code)
+	}
+}
+
+func TestParseRequestPostAllowsContentTypeParameters(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(dnsMsg(0))
+	}))
+	t.Cleanup(upstream.Close)
+
+	h := New(Config{
+		Upstreams:       []string{upstream.URL},
+		BatchSize:       1,
+		UpstreamTimeout: time.Second,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(dnsMsg(0)))
+	req.Header.Set("Content-Type", "Application/DNS-Message; charset=utf-8")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for valid Content-Type with parameters, got %d", rec.Code)
 	}
 }
 
@@ -117,6 +155,30 @@ func TestQueryOneRejectsOversizedResponse(t *testing.T) {
 	}
 	if !strings.Contains(res.err.Error(), "too large") {
 		t.Fatalf("unexpected error: %v", res.err)
+	}
+}
+
+func TestQueryOnePreservesExistingUpstreamQuery(t *testing.T) {
+	var sawCustom atomic.Bool
+	var sawDNS atomic.Bool
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawCustom.Store(r.URL.Query().Get("provider") == "custom")
+		sawDNS.Store(r.URL.Query().Get("dns") != "")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(dnsMsg(0))
+	}))
+	t.Cleanup(upstream.Close)
+
+	h := New(Config{UpstreamTimeout: time.Second})
+	res := h.queryOne(context.Background(), upstream.URL+"?provider=custom", http.MethodGet, "abc", nil)
+	if res.err != nil {
+		t.Fatalf("expected successful query, got error: %v", res.err)
+	}
+	if !sawCustom.Load() {
+		t.Fatalf("expected existing upstream query parameters to be preserved")
+	}
+	if !sawDNS.Load() {
+		t.Fatalf("expected dns query parameter to be appended")
 	}
 }
 
@@ -231,20 +293,30 @@ func TestDNSTTLExtraction(t *testing.T) {
 	// Question: root-label(1) + QTYPE(2) + QCLASS(2) = 5 bytes.
 	// Answer:   root-label(1) + TYPE(2) + CLASS(2) + TTL(4) + RDLENGTH(2) + RDATA(4) = 15 bytes.
 	msg := make([]byte, 32)
-	msg[4] = 0; msg[5] = 1  // QDCOUNT = 1
-	msg[6] = 0; msg[7] = 1  // ANCOUNT = 1
+	msg[4] = 0
+	msg[5] = 1 // QDCOUNT = 1
+	msg[6] = 0
+	msg[7] = 1 // ANCOUNT = 1
 	// Question at offset 12.
-	msg[12] = 0             // root label
-	msg[13] = 0; msg[14] = 1 // QTYPE A
-	msg[15] = 0; msg[16] = 1 // QCLASS IN
+	msg[12] = 0 // root label
+	msg[13] = 0
+	msg[14] = 1 // QTYPE A
+	msg[15] = 0
+	msg[16] = 1 // QCLASS IN
 	// Answer at offset 17.
-	msg[17] = 0              // root label
-	msg[18] = 0; msg[19] = 1 // TYPE A
-	msg[20] = 0; msg[21] = 1 // CLASS IN
+	msg[17] = 0 // root label
+	msg[18] = 0
+	msg[19] = 1 // TYPE A
+	msg[20] = 0
+	msg[21] = 1 // CLASS IN
 	// TTL = 300 = 0x0000012C
-	msg[22] = 0; msg[23] = 0; msg[24] = 1; msg[25] = 0x2c
+	msg[22] = 0
+	msg[23] = 0
+	msg[24] = 1
+	msg[25] = 0x2c
 	// RDLENGTH = 4
-	msg[26] = 0; msg[27] = 4
+	msg[26] = 0
+	msg[27] = 4
 	// RDATA: 4 zero bytes (already zero-initialized)
 
 	ttl := dnsTTL(msg)

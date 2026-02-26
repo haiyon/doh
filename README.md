@@ -14,7 +14,7 @@ Accepts standard DoH queries (GET and POST) and fans them out concurrently to a 
 - Per-IP token bucket rate limiting — honours `X-Forwarded-For` / `X-Real-IP`
 - Bearer token authentication
 - Per-upstream request timeout with graceful fallback
-- POST body size limit (64 KiB)
+- Request payload size limit (65,535 bytes decoded wire bytes for GET/POST)
 - HTTP/2 upstream connections
 - `Cache-Control` response header derived from DNS TTL
 - `/healthz` liveness endpoint
@@ -41,18 +41,18 @@ go build -trimpath -ldflags="-s -w -buildid= -X main.version=$(git describe --ta
 
 ### Flags
 
-| Flag                | Default      | Description                                                        |
-| ------------------- | ------------ | ------------------------------------------------------------------ |
-| `-addr`             | `:8053`      | HTTP listen address                                                |
-| `-cache-ttl`        | `10m`        | Maximum cache TTL (capped by DNS record TTL)                       |
-| `-batch-size`       | `3`          | Upstreams queried concurrently per round                           |
-| `-upstream-timeout` | `4s`         | Per-upstream HTTP request timeout                                  |
-| `-region`           | `global`     | Upstream preset region: `global`, `us`, `kr`, `cn`                 |
-| `-upstreams`        | _(disabled)_ | Comma-separated upstream DoH URLs (overrides `-region`)            |
-| `-token`            | _(disabled)_ | Bearer token required in `Authorization` header                    |
-| `-rate-limit`       | `0`          | Max requests per second per IP (`0` = disabled)                    |
-| `-rate-burst`       | `0`          | Token bucket burst capacity (defaults to `-rate-limit`)            |
-| `-debug`            | `false`      | Enable per-request query logging (name, type, rcode, ttl, latency) |
+| Flag                | Default             | Description                                                        |
+| ------------------- | ------------------- | ------------------------------------------------------------------ |
+| `-addr`             | `:$PORT` or `:8053` | HTTP listen address (`PORT` env takes precedence when set)         |
+| `-cache-ttl`        | `10m`               | Maximum cache TTL (capped by DNS record TTL)                       |
+| `-batch-size`       | `3`                 | Upstreams queried concurrently per round                           |
+| `-upstream-timeout` | `4s`                | Per-upstream HTTP request timeout                                  |
+| `-region`           | `global`            | Upstream preset region: `global`, `us`, `kr`, `cn`                 |
+| `-upstreams`        | _(disabled)_        | Comma-separated upstream DoH URLs (overrides `-region`)            |
+| `-token`            | _(disabled)_        | Bearer token required in `Authorization` header                    |
+| `-rate-limit`       | `0`                 | Max requests per second per IP (`0` = disabled)                    |
+| `-rate-burst`       | `0`                 | Token bucket burst capacity (defaults to `-rate-limit`)            |
+| `-debug`            | `false`             | Enable per-request query logging (name, type, rcode, ttl, latency) |
 
 ### Examples
 
@@ -141,6 +141,133 @@ docker compose logs -f
 
 To customise flags, edit the `command:` section in `docker-compose.yml`.
 
+### Serverless (multi-platform)
+
+The repository includes native serverless entrypoints and templates:
+
+- Vercel Functions (Go): `api/dns-query/index.go`, `api/healthz/index.go`, `vercel.json`
+- Cloudflare Workers: `deploy/cloudflare/worker.mjs`, `deploy/cloudflare/wrangler.jsonc.example`
+- Netlify Functions (Go): `deploy/netlify/functions/*`, `netlify.toml`
+- Railway config file: `railway.json`
+- Shared env-driven app bootstrap: `relay/relay.go`
+
+Common environment variables:
+
+| Variable                  | Default   | Description                                      |
+| ------------------------- | --------- | ------------------------------------------------ |
+| `DOH_REGION`              | `global`  | Upstream preset: `global`, `us`, `kr`, `cn`      |
+| `DOH_UPSTREAMS`           | _(empty)_ | Comma-separated upstream list (overrides region) |
+| `DOH_CACHE_TTL`           | `10m`     | Cache TTL upper bound                            |
+| `DOH_BATCH_SIZE`          | `3`       | Concurrent upstreams per round                   |
+| `DOH_UPSTREAM_TIMEOUT`    | `4s`      | Upstream timeout for Go runtime targets          |
+| `DOH_UPSTREAM_TIMEOUT_MS` | `4000`    | Upstream timeout for Cloudflare Worker           |
+| `DOH_TOKEN`               | _(empty)_ | Bearer token                                     |
+| `DOH_RATE_LIMIT`          | `0`       | Per-IP RPS (Go runtime targets only)             |
+| `DOH_RATE_BURST`          | `0`       | Token bucket burst (Go runtime targets only)     |
+| `DOH_DEBUG`               | `false`   | Enable debug logs                                |
+| `DOH_EDGE_CACHE`          | `false`   | Cloudflare Worker Cache API toggle (GET only)    |
+
+#### Vercel Functions (Go)
+
+```bash
+# First deployment
+vercel
+
+# Production deployment
+vercel --prod
+```
+
+Best practices:
+
+- Keep serverless handlers stateless. In-memory cache/rate-limit are per instance, not global.
+- Vercel filesystem is read-only except `/tmp` (ephemeral, size-limited), so do not persist state to local disk.
+- Keep upstream timeout conservative (for example 2s-4s) to reduce function duration and retries.
+
+#### Cloudflare Workers
+
+```bash
+cd deploy/cloudflare
+cp wrangler.jsonc.example wrangler.jsonc
+wrangler secret put DOH_TOKEN
+wrangler deploy
+```
+
+Best practices:
+
+- Cloudflare Workers do not provide native `net/http` Go runtime; this repo provides a Worker template for edge/serverless use.
+- Worker memory is ephemeral per isolate; do not rely on process-local token buckets for global throttling.
+- Cache API is data-center local. Enable `DOH_EDGE_CACHE=true` only when local edge caching behavior is acceptable.
+- For upstream-heavy workloads, consider `placement.mode = "smart"` in Wrangler config.
+
+#### Netlify Functions (Go)
+
+```bash
+# First deployment
+netlify deploy
+
+# Production deployment
+netlify deploy --prod
+```
+
+Best practices:
+
+- Keep function code stateless; memory cache/rate-limit are per instance.
+- For custom Go builds in Netlify, target Linux amd64 (`GOOS=linux`, `GOARCH=amd64`) per Netlify runtime requirements.
+- Use `netlify.toml` redirects so clients can call `/dns-query` and `/healthz` directly.
+
+#### Container serverless targets
+
+The existing image works directly with Railway / Cloud Run / AWS Lambda container image mode.
+
+Railway:
+
+```bash
+# Use repository default railway.json
+cat railway.json
+```
+
+Best practices:
+
+- Railway injects `PORT`; this project now auto-binds to `:$PORT` when `-addr` is not explicitly set.
+- Keep `healthcheckPath` as `/healthz` for reliable rolling deploy checks.
+
+Cloud Run example:
+
+```bash
+gcloud run deploy doh \
+  --image docker.io/haiyon/doh:v0.1.1 \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars DOH_REGION=global
+```
+
+AWS Lambda (container image) example:
+
+```bash
+aws lambda create-function \
+  --function-name doh-relay \
+  --package-type Image \
+  --code ImageUri=docker.io/haiyon/doh:v0.1.1 \
+  --role arn:aws:iam::<account-id>:role/<lambda-exec-role>
+```
+
+Official references:
+
+- Vercel Go runtime: <https://vercel.com/docs/functions/runtimes/go>
+- Vercel runtime environment (`/tmp`): <https://vercel.com/docs/functions/runtimes>
+- Cloudflare supported languages/runtimes: <https://developers.cloudflare.com/workers/languages/>
+- Cloudflare Wrangler configuration: <https://developers.cloudflare.com/workers/wrangler/configuration/>
+- Cloudflare Cache API behavior: <https://developers.cloudflare.com/workers/runtime-apis/cache/>
+- Cloudflare Smart Placement: <https://developers.cloudflare.com/workers/configuration/smart-placement/>
+- Netlify Go Functions: <https://docs.netlify.com/build/functions/languages/go/>
+- Netlify custom Go build requirements: <https://docs.netlify.com/build/functions/languages/go/#custom-builds>
+- Railway Dockerfile deploy: <https://docs.railway.com/guides/dockerfiles>
+- Railway config as code: <https://docs.railway.com/reference/config-as-code>
+- Go module layout: <https://go.dev/doc/modules/layout>
+- Cloud Run request concurrency: <https://cloud.google.com/run/docs/about-concurrency>
+- AWS Lambda best practices: <https://docs.aws.amazon.com/lambda/latest/dg/best-practices.html>
+- AWS Lambda container images: <https://docs.aws.amazon.com/lambda/latest/dg/images-create.html>
+
 ### TLS / reverse proxy
 
 The server speaks plain HTTP. Put it behind nginx or Caddy for TLS termination — DoH clients require HTTPS.
@@ -165,7 +292,7 @@ server {
 
 **Caddy example:**
 
-```
+```text
 doh.example.com {
     reverse_proxy /dns-query localhost:8053
 }
@@ -205,3 +332,32 @@ HTTP Server
             └─ ... all batches exhausted
                   └─ first non-error response  OR  502
 ```
+
+## Project Structure
+
+```text
+doh/
+├── main.go
+├── api/
+│   ├── dns-query/index.go     # Vercel function entrypoint (/dns-query)
+│   ├── healthz/index.go       # Vercel function entrypoint (/healthz)
+│   └── shared/runtime.go      # Vercel shared lazy init runtime
+├── relay/
+│   └── relay.go               # Shared env-based app bootstrap
+├── deploy/
+│   ├── cloudflare/            # Worker + Wrangler template
+│   ├── netlify/functions/     # Netlify Go function entrypoints
+│   └── README.md              # Deployment layout notes
+├── netlify.toml               # Netlify redirects and function directory
+├── railway.json               # Railway deployment config (config-as-code)
+├── vercel.json
+├── handler/
+├── upstream/
+├── cache/
+├── ratelimit/
+└── health/
+```
+
+## License
+
+MIT

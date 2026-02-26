@@ -14,11 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/haiyon/doh/cache"
-	"github.com/haiyon/doh/handler"
-	"github.com/haiyon/doh/health"
-	"github.com/haiyon/doh/ratelimit"
-	"github.com/haiyon/doh/upstream"
+	"github.com/haiyon/doh/relay"
 )
 
 // version is injected at build time via -ldflags "-X main.version=<tag>".
@@ -34,7 +30,7 @@ func main() {
 		return
 	}
 
-	addr := flag.String("addr", ":8053", "HTTP listen address")
+	addr := flag.String("addr", defaultListenAddr(), "HTTP listen address")
 	cacheTTL := flag.Duration("cache-ttl", 600*time.Second, "Cache TTL for successful DNS responses")
 	batchSize := flag.Int("batch-size", 3, "Number of upstreams queried concurrently per round")
 	upstreamTimeout := flag.Duration("upstream-timeout", 4*time.Second, "Per-upstream HTTP request timeout")
@@ -46,19 +42,6 @@ func main() {
 	debug := flag.Bool("debug", false, "Enable per-request query logging")
 	flag.Parse()
 
-	if *cacheTTL <= 0 {
-		log.Printf("invalid -cache-ttl=%s; fallback to 10m", cacheTTL.String())
-		*cacheTTL = 10 * time.Minute
-	}
-	if *upstreamTimeout <= 0 {
-		log.Printf("invalid -upstream-timeout=%s; fallback to 4s", upstreamTimeout.String())
-		*upstreamTimeout = 4 * time.Second
-	}
-	if *batchSize <= 0 {
-		log.Printf("invalid -batch-size=%d; fallback to 3", *batchSize)
-		*batchSize = 3
-	}
-
 	var overrides []string
 	if *upstreamList != "" {
 		for _, u := range strings.Split(*upstreamList, ",") {
@@ -67,35 +50,18 @@ func main() {
 			}
 		}
 	}
-	*region = strings.ToLower(strings.TrimSpace(*region))
-	upstreams := upstream.Resolve(overrides, upstream.Region(*region))
-
-	var limiter *ratelimit.Limiter
-	if *rateLimit > 0 {
-		burst := *rateBurst
-		if burst <= 0 {
-			burst = *rateLimit
-		}
-		limiter = ratelimit.New(*rateLimit, burst)
-		defer limiter.Close()
-	}
-
-	c := cache.New(*cacheTTL)
-	defer c.Close()
-
-	h := handler.New(handler.Config{
-		Upstreams:       upstreams,
-		Cache:           c,
+	mux, cleanup := relay.Build(version, relay.Config{
+		CacheTTL:        *cacheTTL,
 		BatchSize:       *batchSize,
 		UpstreamTimeout: *upstreamTimeout,
+		Region:          *region,
+		Upstreams:       overrides,
 		Token:           *token,
-		Limiter:         limiter,
+		RateLimit:       *rateLimit,
+		RateBurst:       *rateBurst,
 		Debug:           *debug,
 	})
-
-	mux := http.NewServeMux()
-	mux.Handle("/dns-query", h)
-	mux.Handle("/healthz", health.Handler(version))
+	defer cleanup()
 
 	srv := &http.Server{
 		Addr:              *addr,
@@ -143,4 +109,15 @@ func probe() error {
 		return fmt.Errorf("healthz returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+func defaultListenAddr() string {
+	port := strings.TrimSpace(os.Getenv("PORT"))
+	if port == "" {
+		return ":8053"
+	}
+	if strings.HasPrefix(port, ":") {
+		return port
+	}
+	return ":" + port
 }
