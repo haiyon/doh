@@ -43,6 +43,7 @@ func main() {
 	token := flag.String("token", "", "Bearer token required in Authorization header (disabled when empty)")
 	rateLimit := flag.Float64("rate-limit", 0, "Max requests per second per IP (disabled when 0)")
 	rateBurst := flag.Float64("rate-burst", 0, "Token bucket burst capacity (defaults to -rate-limit when 0)")
+	debug := flag.Bool("debug", false, "Enable per-request query logging")
 	flag.Parse()
 
 	if *cacheTTL <= 0 {
@@ -89,6 +90,7 @@ func main() {
 		UpstreamTimeout: *upstreamTimeout,
 		Token:           *token,
 		Limiter:         limiter,
+		Debug:           *debug,
 	})
 
 	mux := http.NewServeMux()

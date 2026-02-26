@@ -41,17 +41,18 @@ go build -trimpath -ldflags="-s -w -buildid= -X main.version=$(git describe --ta
 
 ### Flags
 
-| Flag                | Default      | Description                                             |
-| ------------------- | ------------ | ------------------------------------------------------- |
-| `-addr`             | `:8053`      | HTTP listen address                                     |
-| `-cache-ttl`        | `10m`        | Maximum cache TTL (capped by DNS record TTL)            |
-| `-batch-size`       | `3`          | Upstreams queried concurrently per round                |
-| `-upstream-timeout` | `4s`         | Per-upstream HTTP request timeout                       |
-| `-region`           | `global`     | Upstream preset region: `global`, `us`, `kr`, `cn`      |
-| `-upstreams`        | _(disabled)_ | Comma-separated upstream DoH URLs (overrides `-region`) |
-| `-token`            | _(disabled)_ | Bearer token required in `Authorization` header         |
-| `-rate-limit`       | `0`          | Max requests per second per IP (`0` = disabled)         |
-| `-rate-burst`       | `0`          | Token bucket burst capacity (defaults to `-rate-limit`) |
+| Flag                | Default      | Description                                                        |
+| ------------------- | ------------ | ------------------------------------------------------------------ |
+| `-addr`             | `:8053`      | HTTP listen address                                                |
+| `-cache-ttl`        | `10m`        | Maximum cache TTL (capped by DNS record TTL)                       |
+| `-batch-size`       | `3`          | Upstreams queried concurrently per round                           |
+| `-upstream-timeout` | `4s`         | Per-upstream HTTP request timeout                                  |
+| `-region`           | `global`     | Upstream preset region: `global`, `us`, `kr`, `cn`                 |
+| `-upstreams`        | _(disabled)_ | Comma-separated upstream DoH URLs (overrides `-region`)            |
+| `-token`            | _(disabled)_ | Bearer token required in `Authorization` header                    |
+| `-rate-limit`       | `0`          | Max requests per second per IP (`0` = disabled)                    |
+| `-rate-burst`       | `0`          | Token bucket burst capacity (defaults to `-rate-limit`)            |
+| `-debug`            | `false`      | Enable per-request query logging (name, type, rcode, ttl, latency) |
 
 ### Examples
 

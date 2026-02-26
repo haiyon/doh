@@ -3,6 +3,8 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -249,6 +251,148 @@ func TestDNSTTLExtraction(t *testing.T) {
 	if ttl != 300 {
 		t.Fatalf("expected TTL=300, got %d", ttl)
 	}
+}
+
+func TestDebugLoggingCacheMissAndHit(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(dnsMsg(0))
+	}))
+	t.Cleanup(upstream.Close)
+
+	c := cache.New(time.Minute)
+	t.Cleanup(c.Close)
+
+	h := New(Config{
+		Upstreams:       []string{upstream.URL},
+		Cache:           c,
+		BatchSize:       1,
+		UpstreamTimeout: time.Second,
+		Debug:           true,
+	})
+	dns := base64.RawURLEncoding.EncodeToString(dnsMsg(0))
+
+	logs := captureLogs(t, func() {
+		req1 := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+dns, nil)
+		rec1 := httptest.NewRecorder()
+		h.ServeHTTP(rec1, req1)
+		if rec1.Code != http.StatusOK {
+			t.Fatalf("expected first request success, got %d", rec1.Code)
+		}
+
+		req2 := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+dns, nil)
+		rec2 := httptest.NewRecorder()
+		h.ServeHTTP(rec2, req2)
+		if rec2.Code != http.StatusOK {
+			t.Fatalf("expected second request success, got %d", rec2.Code)
+		}
+	})
+
+	if !strings.Contains(logs, "[debug]") {
+		t.Fatalf("expected debug logs, got %q", logs)
+	}
+	if !strings.Contains(logs, "cache=MISS") {
+		t.Fatalf("expected cache MISS debug log, got %q", logs)
+	}
+	if !strings.Contains(logs, "cache=HIT") {
+		t.Fatalf("expected cache HIT debug log, got %q", logs)
+	}
+}
+
+func TestDebugLoggingDisabledByDefault(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(dnsMsg(0))
+	}))
+	t.Cleanup(upstream.Close)
+
+	h := New(Config{
+		Upstreams:       []string{upstream.URL},
+		BatchSize:       1,
+		UpstreamTimeout: time.Second,
+	})
+	dns := base64.RawURLEncoding.EncodeToString(dnsMsg(0))
+
+	logs := captureLogs(t, func() {
+		req := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+dns, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected request success, got %d", rec.Code)
+		}
+	})
+
+	if strings.Contains(logs, "[debug]") {
+		t.Fatalf("did not expect debug logs when disabled, got %q", logs)
+	}
+}
+
+func TestDebugLoggingOnBadGateway(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(upstream.Close)
+
+	h := New(Config{
+		Upstreams:       []string{upstream.URL},
+		BatchSize:       1,
+		UpstreamTimeout: time.Second,
+		Debug:           true,
+	})
+	dns := base64.RawURLEncoding.EncodeToString(dnsMsg(0))
+
+	var rec *httptest.ResponseRecorder
+	logs := captureLogs(t, func() {
+		req := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+dns, nil)
+		rec = httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+	})
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", rec.Code)
+	}
+	if !strings.Contains(logs, "error=bad_gateway") {
+		t.Fatalf("expected debug bad_gateway log, got %q", logs)
+	}
+}
+
+func TestClientIPHandlesIPv6RemoteAddr(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/dns-query", nil)
+	req.RemoteAddr = "[2001:db8::1]:5353"
+	if got := clientIP(req); got != "2001:db8::1" {
+		t.Fatalf("expected IPv6 host, got %q", got)
+	}
+}
+
+func TestClientIPPrioritizesForwardedHeaders(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/dns-query", nil)
+	req.RemoteAddr = "10.0.0.2:1234"
+	req.Header.Set("X-Forwarded-For", "198.51.100.8, 203.0.113.9")
+	req.Header.Set("X-Real-IP", "192.0.2.3")
+	if got := clientIP(req); got != "198.51.100.8" {
+		t.Fatalf("expected first X-Forwarded-For IP, got %q", got)
+	}
+}
+
+func captureLogs(t *testing.T, fn func()) string {
+	t.Helper()
+
+	oldWriter := log.Writer()
+	oldFlags := log.Flags()
+	oldPrefix := log.Prefix()
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	log.SetPrefix("")
+	defer func() {
+		log.SetOutput(oldWriter)
+		log.SetFlags(oldFlags)
+		log.SetPrefix(oldPrefix)
+	}()
+
+	fn()
+	return buf.String()
 }
 
 func dnsMsg(rcode int) []byte {

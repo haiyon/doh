@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -39,9 +40,11 @@ type errorDetail struct {
 
 // upstreamResult carries the result of a single upstream query attempt.
 type upstreamResult struct {
-	body  []byte
-	rcode int
-	err   error
+	body    []byte
+	rcode   int
+	err     error
+	latency time.Duration
+	url     string
 }
 
 // Config holds the dependencies and tuning parameters for Handler.
@@ -64,6 +67,9 @@ type Config struct {
 
 	// Limiter, when non-nil, enforces per-IP request rate limiting.
 	Limiter *ratelimit.Limiter
+
+	// Debug enables per-request query logging.
+	Debug bool
 }
 
 // Handler is an http.Handler that proxies DoH queries to a pool of upstream resolvers.
@@ -122,9 +128,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // handle processes a validated GET or POST DoH request.
 func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+
 	dnsPayload, body, ok := h.parseRequest(w, r)
 	if !ok {
 		return
+	}
+
+	qname, qtype := ".", "UNKNOWN"
+	if h.cfg.Debug {
+		// Decode DNS bytes only in debug mode for query-level logging.
+		var rawMsg []byte
+		if r.Method == http.MethodGet {
+			rawMsg, _ = base64.RawURLEncoding.DecodeString(dnsPayload)
+		} else {
+			rawMsg = body
+		}
+		qname, qtype = dnsQuestion(rawMsg)
 	}
 
 	cacheKey := buildCacheKey(dnsPayload, body)
@@ -133,6 +153,10 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", contentTypeDNS)
 			w.Header().Set("X-Cache", "HIT")
 			_, _ = w.Write(cached)
+			if h.cfg.Debug {
+				log.Printf("[debug] %s %s %s %s cache=HIT latency=%s",
+					clientIP(r), r.Method, qname, qtype, time.Since(start).Round(time.Microsecond))
+			}
 			return
 		}
 	}
@@ -140,6 +164,10 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.queryUpstreams(r.Context(), r.Method, dnsPayload, body)
 	if err != nil {
 		log.Printf("all upstreams failed: %v", err)
+		if h.cfg.Debug {
+			log.Printf("[debug] %s %s %s %s cache=MISS error=bad_gateway latency=%s",
+				clientIP(r), r.Method, qname, qtype, time.Since(start).Round(time.Microsecond))
+		}
 		writeError(w, http.StatusBadGateway, "All upstream DoH resolvers failed")
 		return
 	}
@@ -161,6 +189,12 @@ func (h *Handler) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("X-Cache", "MISS")
 	_, _ = w.Write(resp)
+
+	if h.cfg.Debug {
+		rcode := dnsRcode(resp)
+		log.Printf("[debug] %s %s %s %s cache=MISS rcode=%d ttl=%ds latency=%s",
+			clientIP(r), r.Method, qname, qtype, rcode, ttl, time.Since(start).Round(time.Microsecond))
+	}
 }
 
 // parseRequest extracts the DNS payload identifier and raw body from r.
@@ -256,9 +290,15 @@ func (h *Handler) queryBatch(
 	for range batch {
 		res := <-results
 		if res.err != nil {
-			log.Printf("upstream error: %v", res.err)
+			log.Printf("upstream error [%s]: %v", res.url, res.err)
 			transportErrors++
+			if h.cfg.Debug {
+				log.Printf("[debug] upstream %s err=%v latency=%s", res.url, res.err, res.latency.Round(time.Microsecond))
+			}
 			continue
+		}
+		if h.cfg.Debug {
+			log.Printf("[debug] upstream %s rcode=%d latency=%s", res.url, res.rcode, res.latency.Round(time.Microsecond))
 		}
 		if res.rcode == dnsRcodeNoError {
 			cancel()
@@ -292,35 +332,37 @@ func (h *Handler) queryOne(ctx context.Context, url, method, dnsPayload string, 
 		}
 	}
 	if err != nil {
-		return upstreamResult{err: fmt.Errorf("build request: %w", err)}
+		return upstreamResult{url: url, err: fmt.Errorf("build request: %w", err)}
 	}
 	req.Header.Set("Accept", contentTypeDNS)
 
+	start := time.Now()
 	resp, err := h.client.Do(req)
+	latency := time.Since(start)
 	if err != nil {
-		return upstreamResult{err: fmt.Errorf("do request: %w", err)}
+		return upstreamResult{url: url, err: fmt.Errorf("do request: %w", err), latency: latency}
 	}
 
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1024))
 		if closeErr := resp.Body.Close(); closeErr != nil {
-			return upstreamResult{err: fmt.Errorf("upstream HTTP %d: close body: %w", resp.StatusCode, closeErr)}
+			return upstreamResult{url: url, err: fmt.Errorf("upstream HTTP %d: close body: %w", resp.StatusCode, closeErr), latency: latency}
 		}
-		return upstreamResult{err: fmt.Errorf("upstream HTTP %d", resp.StatusCode)}
+		return upstreamResult{url: url, err: fmt.Errorf("upstream HTTP %d", resp.StatusCode), latency: latency}
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize+1))
 	closeErr := resp.Body.Close()
 	if err != nil {
-		return upstreamResult{err: fmt.Errorf("read body: %w", err)}
+		return upstreamResult{url: url, err: fmt.Errorf("read body: %w", err), latency: latency}
 	}
 	if closeErr != nil {
-		return upstreamResult{err: fmt.Errorf("close body: %w", closeErr)}
+		return upstreamResult{url: url, err: fmt.Errorf("close body: %w", closeErr), latency: latency}
 	}
 	if len(data) > maxBodySize {
-		return upstreamResult{err: fmt.Errorf("upstream response too large: >%d bytes", maxBodySize)}
+		return upstreamResult{url: url, err: fmt.Errorf("upstream response too large: >%d bytes", maxBodySize), latency: latency}
 	}
-	return upstreamResult{body: data, rcode: dnsRcode(data)}
+	return upstreamResult{url: url, body: data, rcode: dnsRcode(data), latency: latency}
 }
 
 // dnsRcode extracts the 4-bit RCODE from a DNS wire-format message.
@@ -426,6 +468,108 @@ func writeSegment(h io.Writer, data []byte) {
 	if len(data) > 0 {
 		_, _ = h.Write(data)
 	}
+}
+
+// dnsQuestion extracts the query name and query type from a DNS wire-format message.
+// Returns (".", "UNKNOWN") for malformed messages.
+func dnsQuestion(msg []byte) (qname, qtype string) {
+	if len(msg) < 12 {
+		return ".", "UNKNOWN"
+	}
+	qdCount := int(msg[4])<<8 | int(msg[5])
+	if qdCount == 0 {
+		return ".", "UNKNOWN"
+	}
+	offset := 12
+	// Decode the first QNAME label sequence.
+	var name []byte
+	for {
+		if offset >= len(msg) {
+			return ".", "UNKNOWN"
+		}
+		length := int(msg[offset])
+		if length == 0 {
+			offset++
+			break
+		}
+		if length&0xc0 != 0 {
+			// Pointer or reserved — skip gracefully.
+			offset += 2
+			break
+		}
+		if offset+1+length > len(msg) {
+			return ".", "UNKNOWN"
+		}
+		if len(name) > 0 {
+			name = append(name, '.')
+		}
+		name = append(name, msg[offset+1:offset+1+length]...)
+		offset += 1 + length
+	}
+	if len(name) == 0 {
+		qname = "."
+	} else {
+		qname = string(name)
+	}
+	// QTYPE is the first 2 bytes after QNAME.
+	if offset+2 > len(msg) {
+		return qname, "UNKNOWN"
+	}
+	qt := uint16(msg[offset])<<8 | uint16(msg[offset+1])
+	return qname, qtypeName(qt)
+}
+
+// qtypeName maps common DNS QTYPE values to their string representation.
+func qtypeName(qt uint16) string {
+	switch qt {
+	case 1:
+		return "A"
+	case 2:
+		return "NS"
+	case 5:
+		return "CNAME"
+	case 6:
+		return "SOA"
+	case 12:
+		return "PTR"
+	case 15:
+		return "MX"
+	case 16:
+		return "TXT"
+	case 28:
+		return "AAAA"
+	case 33:
+		return "SRV"
+	case 43:
+		return "DS"
+	case 46:
+		return "RRSIG"
+	case 48:
+		return "DNSKEY"
+	case 65:
+		return "HTTPS"
+	case 255:
+		return "ANY"
+	default:
+		return fmt.Sprintf("TYPE%d", qt)
+	}
+}
+
+// clientIP returns the real client IP from X-Forwarded-For, X-Real-IP, or RemoteAddr.
+func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i > 0 {
+			return strings.TrimSpace(xff[:i])
+		}
+		return strings.TrimSpace(xff)
+	}
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return strings.TrimSpace(xri)
+	}
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		return host
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 // writeError writes a JSON error response with the given HTTP status code.

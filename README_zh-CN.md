@@ -52,6 +52,7 @@ go build -trimpath -ldflags="-s -w -buildid= -X main.version=$(git describe --ta
 | `-token`            | _（禁用）_ | `Authorization` 头中要求的 Bearer Token       |
 | `-rate-limit`       | `0`        | 每 IP 每秒最大请求数（`0` 表示禁用）          |
 | `-rate-burst`       | `0`        | 令牌桶突发容量（默认等于 `-rate-limit`）      |
+| `-debug`            | `false`    | 启用每请求查询日志（域名、类型、rcode、ttl、延迟） |
 
 ### 使用示例
 
