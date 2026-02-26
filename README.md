@@ -340,8 +340,9 @@ doh/
 ├── main.go
 ├── api/
 │   ├── dns-query/index.go     # Vercel function entrypoint (/dns-query)
-│   ├── healthz/index.go       # Vercel function entrypoint (/healthz)
-│   └── shared/runtime.go      # Vercel shared lazy init runtime
+│   └── healthz/index.go       # Vercel function entrypoint (/healthz)
+├── platform/
+│   └── runtime.go             # Vercel shared lazy init runtime
 ├── relay/
 │   └── relay.go               # Shared env-based app bootstrap
 ├── deploy/

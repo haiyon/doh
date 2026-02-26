@@ -340,8 +340,9 @@ doh/
 ├── main.go              # 程序入口，参数解析，服务生命周期，健康探针
 ├── api/
 │   ├── dns-query/index.go     # Vercel 函数入口（/dns-query）
-│   ├── healthz/index.go       # Vercel 函数入口（/healthz）
-│   └── shared/runtime.go      # Vercel 共享懒加载运行时
+│   └── healthz/index.go       # Vercel 函数入口（/healthz）
+├── platform/
+│   └── runtime.go             # Vercel 共享懒加载运行时
 ├── relay/
 │   └── relay.go               # 统一环境变量启动层
 ├── deploy/

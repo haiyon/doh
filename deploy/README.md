@@ -12,7 +12,7 @@ This folder contains platform-specific deployment adapters and templates.
 
 - Vercel
   - Root-level requirements: `api/*`, `vercel.json`
-  - Shared runtime logic: `api/shared`
+  - Shared runtime logic: `platform`
 - Netlify
   - Root-level requirement: `netlify.toml`
   - Functions source: `deploy/netlify/functions/*`
