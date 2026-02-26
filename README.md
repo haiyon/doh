@@ -204,29 +204,3 @@ HTTP Server
             └─ ... all batches exhausted
                   └─ first non-error response  OR  502
 ```
-
-## Project Structure
-
-```text
-doh/
-├── main.go              # Entry point, flag parsing, server lifecycle, health probe
-├── go.mod
-├── go.sum
-├── Dockerfile           # Multi-stage build → scratch image
-├── docker-compose.yml
-├── doh.service          # systemd unit with security hardening
-├── cache/
-│   └── cache.go         # Thread-safe TTL cache with per-entry TTL support
-├── handler/
-│   └── handler.go       # HTTP handler, auth, upstream fan-out, DNS TTL parsing
-├── health/
-│   └── health.go        # /healthz liveness endpoint
-├── ratelimit/
-│   └── ratelimit.go     # Per-IP token bucket, X-Forwarded-For aware
-└── upstream/
-    └── upstream.go      # Regional upstream presets and resolution
-```
-
-## License
-
-MIT
