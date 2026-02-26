@@ -1,0 +1,55 @@
+[Unit]
+Description=DNS-over-HTTPS relay server
+Documentation=https://github.com/haiyon/doh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/doh \
+    -addr=:8053 \
+    -region=global \
+    -cache-ttl=10m \
+    -batch-size=3 \
+    -upstream-timeout=4s
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+
+# Run as a dynamically-allocated unprivileged user.
+DynamicUser=yes
+
+# Filesystem hardening.
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+
+# Privilege hardening.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SecureBits=noroot noroot-locked
+
+# Syscall / namespace restrictions.
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+
+# Network: only IPv4/IPv6 TCP/UDP needed.
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# Resource limits.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

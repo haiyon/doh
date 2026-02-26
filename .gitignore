@@ -1,0 +1,22 @@
+# Binary output
+/doh
+
+# Test binaries
+*.test
+
+# Build cache
+/dist/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
