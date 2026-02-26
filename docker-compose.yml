@@ -1,0 +1,33 @@
+services:
+  doh:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    image: doh:${VERSION:-dev}
+    restart: unless-stopped
+    ports:
+      - "8053:8053"
+    environment:
+      - TZ=UTC
+    command:
+      - -addr=:8053
+      - -region=global
+      - -cache-ttl=10m
+      - -batch-size=3
+      - -upstream-timeout=4s
+      # Uncomment to enable auth and rate limiting:
+      # - -token=your-secret-token
+      # - -rate-limit=20
+      # - -rate-burst=40
+    healthcheck:
+      test: ["CMD", "/doh", "-healthz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
